@@ -11,35 +11,58 @@
 //! use std::io::Write;
 //!
 //! let mut f = std::fs::File::create("temp").unwrap();
-//! f.write_all("Hello, world!".as_bytes());
-//! f.close();
+//! f.write_all("Hello, world!".as_bytes()).unwrap();
+//! if !f.close().is_ok() {
+//!     // crash, print error and/or try writing the file again
+//! }
 //! ```
 //!
-//! The close() function consumes the File. However, on Windows, a failed close operation may be
-//! retried. For this case the returned CloseError contains the original File.
+//! The close() function consumes the File. If the operation failed, an error containing the
+//! underlying I/O error and the file descriptor/handle of the file is returned. Depending on your
+//! system and the error, closing the file may be retried, but in most cases the best solution is
+//! to try to rewrite the file.
+#[cfg(unix)]
+use std::os::fd::RawFd;
 
-use std::{io, fs};
+#[cfg(windows)]
+use std::os::windows::io::RawHandle;
+
 use std::fmt;
+use std::io;
 
-// TODO allows to close a file without silently discarding the error
-
-/// Wraps any I/O error that can happen during closing the file
+/// Wraps any I/O error that can happen while closing a file
 pub struct CloseError {
-    previous: io::Error,
-    file: Option<fs::File>,
+    io_error: io::Error,
+    #[cfg(unix)]
+    fd: RawFd,
+    #[cfg(windows)]
+    handle: RawHandle,
 }
 
 impl CloseError {
-    /// Returns the original file handle
+    /// Returns the file descriptor assigned to the file
     ///
-    /// This contains the original File, but only if the close operation can be retried safely,
-    /// otherwise it's None.
-    pub fn into_file_handle(self) -> Option<fs::File> {
-        self.file
+    /// This should only be used in very rare cases. Check you OS documentation before use.
+    ///
+    /// OBS: This function is OS specific for unix
+    #[cfg(unix)]
+    pub fn raw_fd(&self) -> RawFd {
+        self.fd
     }
 
-    pub fn unwrap(self) -> io::Error {
-        self.previous
+    /// Returns the file descriptor assigned to the file
+    ///
+    /// This should only be used in very rare cases. Check you OS documentation before use.
+    ///
+    /// OBS: This function is OS specific for windows systems
+    #[cfg(windows)]
+    pub fn raw_handle(&self) -> RawHandle {
+        self.handle
+    }
+
+    /// Returns the error produced when the file was closed.
+    pub fn as_io_error(&self) -> &io::Error {
+        &self.io_error
     }
 }
 
@@ -51,29 +74,29 @@ pub trait Closable {
 
 impl fmt::Display for CloseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.previous, f)
+        fmt::Display::fmt(&self.io_error, f)
     }
 }
 
 impl fmt::Debug for CloseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.previous, f)
+        fmt::Debug::fmt(&self.io_error, f)
     }
 }
 
 #[cfg(unix)]
 mod imp {
-    use std::os::unix::prelude::*;
-    use std::{io, fs};
     use crate::CloseError;
+    use std::os::unix::prelude::*;
+    use std::{fs, io};
 
     impl crate::Closable for fs::File {
         fn close(self) -> Result<(), CloseError> {
             let fd = self.into_raw_fd();
             if unsafe { libc::close(fd) } != 0 {
                 return Err(CloseError {
-                    previous: io::Error::last_os_error(),
-                    file: Some(unsafe { fs::File::from_raw_fd(fd) }),
+                    io_error: io::Error::last_os_error(),
+                    fd,
                 });
             }
             Ok(())
@@ -83,20 +106,21 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use std::os::windows::prelude::*;
-    use std::{io, fs};
     use crate::CloseError;
+    use std::os::windows::prelude::*;
+    use std::{fs, io};
 
     impl crate::Closable for fs::File {
         fn close(self) -> Result<(), CloseError> {
             let handle = self.into_raw_handle();
-            let rc = unsafe {
-                kernel32::CloseHandle(handle)
-            };
+            let rc = unsafe { kernel32::CloseHandle(handle) };
             if rc != 0 {
                 Ok(())
             } else {
-                Err(CloseError { previous: io::Error::last_os_error(), file: Some(unsafe { fs::File::from_raw_handle(handle) }) })
+                Err(CloseError {
+                    io_error: io::Error::last_os_error(),
+                    handle,
+                })
             }
         }
     }
