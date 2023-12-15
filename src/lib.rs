@@ -70,14 +70,13 @@ mod imp {
     impl crate::Closable for fs::File {
         fn close(self) -> Result<(), CloseError> {
             let fd = self.into_raw_fd();
-            let rc = unsafe {
-                libc::close(fd)
-            };
-            if rc == -1 {
-                Ok(())
-            } else {
-                Err(CloseError { previous: io::Error::last_os_error(), file: Some(unsafe { fs::File::from_raw_fd(fd) }) })
+            if unsafe { libc::close(fd) } != 0 {
+                return Err(CloseError {
+                    previous: io::Error::last_os_error(),
+                    file: Some(unsafe { fs::File::from_raw_fd(fd) }),
+                });
             }
+            Ok(())
         }
     }
 }
